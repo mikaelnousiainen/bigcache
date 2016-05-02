@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/allegro/bigcache/queue"
+	"github.com/mikaelnousiainen/bigcache/queue"
 )
 
 const (
@@ -22,6 +22,7 @@ type BigCache struct {
 	hash       Hasher
 	config     Config
 	shardMask  uint64
+	shardSize  int
 }
 
 type cacheShard struct {
@@ -55,11 +56,11 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 		shardMask:  uint64(config.Shards - 1),
 	}
 
-	shardSize := max(config.MaxEntriesInWindow/config.Shards, minimumEntriesInShard)
+	cache.shardSize = max(config.MaxEntriesInWindow/config.Shards, minimumEntriesInShard)
 	for i := 0; i < config.Shards; i++ {
 		cache.shards[i] = &cacheShard{
-			hashmap:     make(map[uint64]uint32, shardSize),
-			entries:     *queue.NewBytesQueue(shardSize*config.MaxEntrySize, config.Verbose),
+			hashmap:     make(map[uint64]uint32, cache.shardSize),
+			entries:     *queue.NewBytesQueue(cache.shardSize*config.MaxEntrySize, config.Verbose),
 			entryBuffer: make([]byte, config.MaxEntrySize+headersSizeInBytes),
 		}
 	}
@@ -123,6 +124,57 @@ func (c *BigCache) Set(key string, entry []byte) {
 	w := wrapEntry(currentTimestamp, hashedKey, key, entry, &shard.entryBuffer)
 	index := shard.entries.Push(w)
 	shard.hashmap[hashedKey] = uint32(index)
+}
+
+// Clear deletes all entries in all shards
+func (c *BigCache) Clear() {
+	for _, shard := range c.shards {
+		shard.lock.Lock()
+		shard.entries.Clear()
+		shard.hashmap = make(map[uint64]uint32, c.shardSize)
+		shard.lock.Unlock()
+	}
+}
+
+// Iterate calls the accept function for all key-value pairs in all shards.
+// Note that the implementation is not thread-safe
+func (c *BigCache) Iterate(accept func (string, []byte)) {
+	for _, shard := range c.shards {
+		for hashedKey, _ := range shard.hashmap {
+			key, value, err := c.getKeyAndValue(shard, hashedKey)
+			if err != nil {
+				continue
+			}
+
+			accept(key, value)
+		}
+	}
+}
+
+func (c* BigCache) Size() uint64 {
+	var count uint64
+	for _, shard := range c.shards {
+		count += uint64(len(shard.hashmap))
+	}
+
+	return count
+}
+
+func (c *BigCache) getKeyAndValue(shard *cacheShard, hashedKey uint64) (string, []byte, error) {
+	itemIndex := shard.hashmap[hashedKey]
+
+	if itemIndex == 0 {
+		return "", nil, notFound("")
+	}
+
+	wrappedEntry, err := shard.entries.Get(int(itemIndex))
+	if err != nil {
+		return "", nil, err
+	}
+
+	entryKey := readKeyFromEntry(wrappedEntry)
+
+	return entryKey, readEntry(wrappedEntry), nil
 }
 
 func (c *BigCache) onEvict(oldestEntry []byte, currentTimestamp uint64, evict func()) {

@@ -132,6 +132,13 @@ func (q *BytesQueue) Pop() ([]byte, error) {
 	return data, nil
 }
 
+func (q *BytesQueue) Clear() {
+	q.head = leftMarginIndex
+	q.tail = leftMarginIndex
+	q.rightMargin = leftMarginIndex
+	q.count = 0
+}
+
 // Peek reads the oldest entry from list without moving head pointer
 func (q *BytesQueue) Peek() ([]byte, error) {
 	if q.count == 0 {
